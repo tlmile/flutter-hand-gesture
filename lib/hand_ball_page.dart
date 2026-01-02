@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'hand_input_bridge.dart';
 
 class HandBallPage extends StatefulWidget {
   const HandBallPage({super.key});
@@ -9,30 +11,93 @@ class HandBallPage extends StatefulWidget {
 }
 
 class _HandBallPageState extends State<HandBallPage> {
-  // 你要小一点：180~210 都好看，这里取 190
+  // Ball base size (before Transform.scale).
   static const double ballSize = 190;
 
+  final HandInputBridge _bridge = HandInputBridge();
+  StreamSubscription<HandPoseData>? _sub;
+
+  // Smoothed hand-driven state.
+  double _xNorm = 0.5; // 0..1
+  double _scale = 1.0;
+
+  // EMA smoothing factors: bigger = more responsive, smaller = smoother.
+  static const double _alphaPos = 0.22;
+  static const double _alphaScale = 0.18;
+
+  static const double _minConfidence = 0.25;
+
+  // Scale range to use in UI.
+  static const double _minScale = 0.70;
+  static const double _maxScale = 1.70;
+
+  // Debug: enable dragging fallback to compare.
+  bool _dragFallback = false;
+
+  // Drag fallback state.
   Offset _center = const Offset(280, 320);
   Offset _dragStartLocal = Offset.zero;
   Offset _centerAtDragStart = Offset.zero;
 
   @override
+  void initState() {
+    super.initState();
+
+    _bridge.start();
+
+    _sub = _bridge.stream.listen((data) {
+      if (data.confidence < _minConfidence) return;
+
+      final nx = _xNorm * (1 - _alphaPos) + data.x * _alphaPos;
+
+      final targetScale = data.scale.clamp(_minScale, _maxScale);
+      final ns = _scale * (1 - _alphaScale) + targetScale * _alphaScale;
+
+      setState(() {
+        _xNorm = nx.clamp(0.0, 1.0);
+        _scale = ns.clamp(_minScale, _maxScale);
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    _bridge.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    const double base = ballSize;
+
     return Scaffold(
       body: LayoutBuilder(
         builder: (context, constraints) {
           final Size size = Size(constraints.maxWidth, constraints.maxHeight);
-          final double half = ballSize / 2;
 
-          // clamp：保证球不会被拖出屏幕
-          final double cx = _center.dx.clamp(half, size.width - half);
-          final double cy = _center.dy.clamp(half, size.height - half);
-          final Offset clampedCenter = Offset(cx, cy);
+          // Map xNorm (0..1) to usable x range, considering scaled ball.
+          final double halfScaled = (base * _scale) / 2;
+          final double minX = halfScaled;
+          final double maxX = size.width - halfScaled;
+          final double cxFromHand = minX + (maxX - minX) * _xNorm;
 
-          // resize 后自动修正
-          if (clampedCenter != _center) {
+          // Keep Y at a pleasant height (or make it driven by hand later).
+          final double cyFromHand = size.height * 0.55;
+          final Offset handCenter = Offset(cxFromHand, cyFromHand);
+
+          // Choose center.
+          final Offset centerToUse = _dragFallback ? _center : handCenter;
+
+          // Clamp to screen.
+          final double cx = centerToUse.dx.clamp(halfScaled, size.width - halfScaled);
+          final double cy = centerToUse.dy.clamp(halfScaled, size.height - halfScaled);
+          final Offset clamped = Offset(cx, cy);
+
+          // If resizing makes drag center out-of-bounds, auto-correct.
+          if (_dragFallback && clamped != _center) {
             WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) setState(() => _center = clampedCenter);
+              if (mounted) setState(() => _center = clamped);
             });
           }
 
@@ -41,7 +106,7 @@ class _HandBallPageState extends State<HandBallPage> {
             children: [
               const _NebulaBackground(),
 
-              // 轻微“星尘划痕”高光层，增强氛围（无图片）
+              // Ambient streak highlight (subtle)
               IgnorePointer(
                 child: Container(
                   decoration: BoxDecoration(
@@ -61,24 +126,44 @@ class _HandBallPageState extends State<HandBallPage> {
               ),
 
               Positioned(
-                left: clampedCenter.dx - half,
-                top: clampedCenter.dy - half,
+                left: clamped.dx - halfScaled,
+                top: clamped.dy - halfScaled,
                 child: GestureDetector(
                   behavior: HitTestBehavior.translucent,
-                  onPanStart: (details) {
-                    _dragStartLocal = details.localPosition;
-                    _centerAtDragStart = clampedCenter;
-                  },
-                  onPanUpdate: (details) {
-                    final Offset delta = details.localPosition - _dragStartLocal;
-                    final Offset next = _centerAtDragStart + delta;
+                  onPanStart: !_dragFallback
+                      ? null
+                      : (details) {
+                          _dragStartLocal = details.localPosition;
+                          _centerAtDragStart = clamped;
+                        },
+                  onPanUpdate: !_dragFallback
+                      ? null
+                      : (details) {
+                          final delta = details.localPosition - _dragStartLocal;
+                          setState(() => _center = _centerAtDragStart + delta);
+                        },
+                  child: Transform.scale(
+                    scale: _scale,
+                    child: const _RealGlassBall(size: base),
+                  ),
+                ),
+              ),
 
-                    final double nx = next.dx.clamp(half, size.width - half);
-                    final double ny = next.dy.clamp(half, size.height - half);
-
-                    setState(() => _center = Offset(nx, ny));
-                  },
-                  child: const _RealGlassBall(size: ballSize),
+              // Small switch for debug
+              Positioned(
+                left: 18,
+                top: 16,
+                child: Row(
+                  children: [
+                    Switch(
+                      value: _dragFallback,
+                      onChanged: (v) => setState(() => _dragFallback = v),
+                    ),
+                    const Text(
+                      'Drag fallback',
+                      style: TextStyle(color: Colors.white70),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -89,7 +174,7 @@ class _HandBallPageState extends State<HandBallPage> {
   }
 }
 
-/// 无图片星云背景：冷暗 + 星点
+/// No-image nebula background.
 class _NebulaBackground extends StatelessWidget {
   const _NebulaBackground();
 
@@ -140,16 +225,15 @@ class _NebulaBackground extends StatelessWidget {
   }
 }
 
-/// 真实球面感：
-/// - 大面积白雾
-/// - 小深蓝内核
-/// - 外圈白环 + 内细环
-/// - 内阴影（inner shadow）
-/// - 顶部弧形反光（specular highlight arc）
-/// - 磨砂玻璃 blur
+/// Realistic glass ball:
+/// - big milky white area
+/// - small dark core
+/// - bright rim
+/// - inner shadow
+/// - specular arc reflection
+/// - frosted blur
 class _RealGlassBall extends StatelessWidget {
   final double size;
-
   const _RealGlassBall({required this.size});
 
   @override
@@ -159,7 +243,7 @@ class _RealGlassBall extends StatelessWidget {
       height: size,
       child: Stack(
         children: [
-          // 外部浮影：让球“浮在”背景上
+          // Outer floating shadow
           Container(
             decoration: BoxDecoration(
               shape: BoxShape.circle,
@@ -180,7 +264,7 @@ class _RealGlassBall extends StatelessWidget {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  // ===== Layer A：基底（小深蓝内核 + 过渡）=====
+                  // Layer A: base core + transition
                   Container(
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
@@ -188,17 +272,16 @@ class _RealGlassBall extends StatelessWidget {
                         center: const Alignment(0.0, 0.18),
                         radius: 1.0,
                         colors: [
-                          const Color(0xFF071A35).withOpacity(0.96), // 内核
-                          const Color(0xFF0E2B55).withOpacity(0.78), // 过渡
-                          Colors.white.withOpacity(0.28),           // 外侧开始偏白
+                          const Color(0xFF071A35).withOpacity(0.96),
+                          const Color(0xFF0E2B55).withOpacity(0.78),
+                          Colors.white.withOpacity(0.28),
                         ],
-                        // 内核更小：越小越接近参考图
                         stops: const [0.0, 0.22, 1.0],
                       ),
                     ),
                   ),
 
-                  // ===== Layer B：大面积白雾（关键：白区域占很大）=====
+                  // Layer B: big milky fog (the key)
                   Container(
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
@@ -206,18 +289,17 @@ class _RealGlassBall extends StatelessWidget {
                         center: const Alignment(0.0, 0.10),
                         radius: 1.0,
                         colors: [
-                          Colors.transparent,              // 让内核透出来
-                          Colors.white.withOpacity(0.18),  // 很靠近中心就开始起雾
+                          Colors.transparent,
+                          Colors.white.withOpacity(0.18),
                           Colors.white.withOpacity(0.36),
-                          Colors.white.withOpacity(0.60),  // 外侧大面积偏白
+                          Colors.white.withOpacity(0.60),
                         ],
-                        // 白雾从 0.18 开始明显出现（更像参考图）
                         stops: const [0.0, 0.18, 0.48, 1.0],
                       ),
                     ),
                   ),
 
-                  // ===== Layer C：边缘更厚更亮的雾圈 =====
+                  // Layer C: thicker bright edge fog
                   Container(
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
@@ -228,14 +310,12 @@ class _RealGlassBall extends StatelessWidget {
                           Colors.white.withOpacity(0.10),
                           Colors.white.withOpacity(0.22),
                         ],
-                        // 往内推：让“偏白边缘”更宽
                         stops: const [0.52, 0.74, 1.0],
                       ),
                     ),
                   ),
 
-                  // ===== Layer D：内阴影（inner shadow）=====
-                  // 通过在边缘叠加一层“暗化环”实现内阴影，增强球面厚度
+                  // Layer D: inner shadow ring (adds thickness)
                   Container(
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
@@ -251,15 +331,14 @@ class _RealGlassBall extends StatelessWidget {
                     ),
                   ),
 
-                  // ===== Layer E：顶部弧形反光（真实感关键）=====
-                  // 用 CustomPaint 画一条弧形高光 + 微弱次高光
+                  // Layer E: specular reflection arc (realism key)
                   IgnorePointer(
                     child: CustomPaint(
                       painter: _SpecularArcPainter(),
                     ),
                   ),
 
-                  // ===== Layer F：局部高光（玻璃漫反射）=====
+                  // Layer F: soft highlight blob
                   Align(
                     alignment: const Alignment(-0.25, -0.40),
                     child: Container(
@@ -278,7 +357,7 @@ class _RealGlassBall extends StatelessWidget {
                     ),
                   ),
 
-                  // ===== 外圈白环 =====
+                  // Outer rim
                   Container(
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
@@ -289,7 +368,7 @@ class _RealGlassBall extends StatelessWidget {
                     ),
                   ),
 
-                  // ===== 内圈细环（增加厚度与层次）=====
+                  // Inner thin ring
                   Padding(
                     padding: const EdgeInsets.all(9),
                     child: Container(
@@ -312,8 +391,7 @@ class _RealGlassBall extends StatelessWidget {
   }
 }
 
-/// 顶部弧形高光 painter：
-/// 画两条弧线（主高光 + 次高光），更像玻璃球“镜面反射”
+/// Specular arc reflection (two arcs).
 class _SpecularArcPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
@@ -321,25 +399,21 @@ class _SpecularArcPainter extends CustomPainter {
     final cy = size.height / 2;
     final r = size.width / 2;
 
-    // 主高光弧：更亮、更细
     final mainPaint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
       ..strokeWidth = r * 0.06
       ..color = Colors.white.withOpacity(0.16);
 
-    // 次高光弧：更淡、更宽一点点
     final subPaint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
       ..strokeWidth = r * 0.10
       ..color = Colors.white.withOpacity(0.06);
 
-    // 弧形矩形区域（略小于圆，避免顶到边框）
     final rectMain = Rect.fromCircle(center: Offset(cx, cy - r * 0.10), radius: r * 0.78);
     final rectSub = Rect.fromCircle(center: Offset(cx, cy - r * 0.08), radius: r * 0.82);
 
-    // 角度：从左上到右上（可微调更像参考图）
     final start = 3.55; // ~203°
     final sweep = 1.15; // ~66°
 
@@ -351,7 +425,7 @@ class _SpecularArcPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
-/// 固定星点，避免闪烁
+/// Fixed stars to avoid flicker.
 class _StarPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
@@ -376,9 +450,9 @@ class _StarPainter extends CustomPainter {
 
     for (int i = 0; i < stars.length; i++) {
       final p = stars[i];
-      final r = (i % 3 + 1).toDouble();
+      final rr = (i % 3 + 1).toDouble();
       paint.color = Colors.white.withOpacity(0.07 + (i % 6) * 0.035);
-      canvas.drawCircle(p, r, paint);
+      canvas.drawCircle(p, rr, paint);
     }
   }
 

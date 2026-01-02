@@ -1,0 +1,4 @@
+Add this to macos/Runner/Info.plist:
+
+<key>NSCameraUsageDescription</key>
+<string>Need camera access to track hand gestures.</string>
