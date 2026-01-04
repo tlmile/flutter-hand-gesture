@@ -51,6 +51,13 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
   bool _isReady = false;
   bool _isInitializing = false;
 
+  three.Color _colorFromHex(int hex) {
+    final r = ((hex >> 16) & 0xFF) / 255;
+    final g = ((hex >> 8) & 0xFF) / 255;
+    final b = (hex & 0xFF) / 255;
+    return three.Color(r, g, b);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -97,9 +104,12 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
 
     // Offscreen render target for mobile; updated into Flutter texture
     _renderTarget = three.WebGLRenderTarget(
-      (_width * _dpr).toInt(),
-      (_height * _dpr).toInt(),
-      three.WebGLRenderTargetOptions(samples: 4, format: three.RGBAFormat),
+      width: (_width * _dpr).toInt(),
+      height: (_height * _dpr).toInt(),
+      options: three.WebGLRenderTargetOptions({
+        'samples': 4,
+        'format': three.RGBAFormat,
+      }),
     );
     _renderer!.setRenderTarget(_renderTarget);
 
@@ -112,13 +122,13 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
 
   void _setupScene() {
     _scene = three.Scene();
-    _scene.background = three.Color.fromHex32(0x000000);
+    _scene.background = _colorFromHex(0x000000);
 
     _camera = three.PerspectiveCamera(60, _width / _height, 0.1, 1000);
     _camera.position.set(0, 2.5, _distance);
 
-    _scene.add(three.AmbientLight(three.Color.fromHex32(0x404040), 1.2));
-    final dirLight = three.DirectionalLight(three.Color.fromHex32(0xffffff), 1.3);
+    _scene.add(three.AmbientLight(_colorFromHex(0x404040), 1.2));
+    final dirLight = three.DirectionalLight(_colorFromHex(0xffffff), 1.3);
     dirLight.position.set(5, 10, 7);
     dirLight.castShadow = true;
     _scene.add(dirLight);
@@ -132,8 +142,8 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
   void _buildGround() {
     final groundGeom = three.CircleGeometry(6, 40);
     final groundMat = three.MeshPhongMaterial({
-      'color': three.Color.fromHex32(0x0f0f14),
-      'emissive': three.Color.fromHex32(0x070708),
+      'color': _colorFromHex(0x0f0f14),
+      'emissive': _colorFromHex(0x070708),
       'side': three.DoubleSide,
     });
     final ground = three.Mesh(groundGeom, groundMat)
@@ -151,7 +161,7 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
       final y = i * 0.9;
       final geometry = three.ConeGeometry(radius, height, 40, 12);
       final material = three.MeshStandardMaterial({
-        'color': three.Color.fromHex32(0x0c5f2d),
+        'color': _colorFromHex(0x0c5f2d),
         'roughness': 0.45,
         'metalness': 0.1,
       });
@@ -162,7 +172,7 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
     final trunk = three.Mesh(
       three.CylinderGeometry(0.4, 0.5, 1.4, 24),
       three.MeshStandardMaterial({
-        'color': three.Color.fromHex32(0x6a4b2c),
+        'color': _colorFromHex(0x6a4b2c),
         'roughness': 0.9,
       }),
     )..position.y = -1.1;
@@ -171,8 +181,8 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
     final star = three.Mesh(
       three.IcosahedronGeometry(0.5, 0),
       three.MeshStandardMaterial({
-        'color': three.Color.fromHex32(0xffe189),
-        'emissive': three.Color.fromHex32(0xffe189),
+        'color': _colorFromHex(0xffe189),
+        'emissive': _colorFromHex(0xffe189),
         'emissiveIntensity': 1.5,
         'metalness': 0.35,
         'roughness': 0.25,
@@ -189,10 +199,10 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
     const bulbCount = 120;
     const turns = 4.5;
     final colors = [
-      three.Color.fromHex32(0xff4757),
-      three.Color.fromHex32(0x5f9dff),
-      three.Color.fromHex32(0xffe45b),
-      three.Color.fromHex32(0xce7bff),
+      _colorFromHex(0xff4757),
+      _colorFromHex(0x5f9dff),
+      _colorFromHex(0xffe45b),
+      _colorFromHex(0xce7bff),
     ];
 
     for (int i = 0; i < bulbCount; i++) {
@@ -239,7 +249,7 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
     );
     geometry.attributes['position']!.needsUpdate = true;
     final material = three.PointsMaterial({
-      'color': three.Color.fromHex32(0xffffff),
+      'color': _colorFromHex(0xffffff),
       'size': 0.06,
       'transparent': true,
       'opacity': 0.8,
@@ -301,7 +311,7 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
     _renderer?.render(_scene, _camera);
     _glPlugin?.gl.flush();
     if (_renderTarget != null && _glPlugin != null) {
-      _glPlugin!.updateTexture(sourceTexture: _renderTarget!.texture);
+      _glPlugin!.updateTexture(_renderTarget!.texture);
     }
   }
 
