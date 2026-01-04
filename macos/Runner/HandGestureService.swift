@@ -34,8 +34,6 @@ final class HandGestureService {
             }
         }
 
-        // 需要一启动就开，就保留；否则你也可以删掉这行，让 Flutter 端来 start
-        controller.start()
-        NSLog("✅ HandGestureService wired & started")
+        NSLog("✅ HandGestureService wired (relative mode; waiting for Flutter start)")
     }
 }

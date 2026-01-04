@@ -3,13 +3,41 @@ import AVFoundation
 import Vision
 import FlutterMacOS
 
-/// Camera + Vision hand tracking:
-/// - indexTip.x -> xNorm (0..1)
-/// - distance(indexTip, thumbTip) -> scale
-/// Sends to Flutter via MethodChannel:
-///   method: "handPose"
-///   args: { "x": Double, "scale": Double, "confidence": Double }
+/// macOS Camera + Vision hand tracking (Relative / trackpad-like).
+///
+/// Native -> Flutter (MethodChannel: "hand_gesture/control"):
+///   - method: "handDelta"
+///     args: { "dx": Double, "dy": Double, "confidence": Double }
+///       dx/dy are *relative movement impulses* in normalized screen units per update.
+///       Flutter integrates these deltas into a cursor/ball position with inertia.
+///   - method: "handLost"
+///     args: nil
+///
+/// Flutter -> Native:
+///   - "start" / "stop"
 final class HandGestureController: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+
+    // MARK: - Public
+
+    func setChannel(_ c: FlutterMethodChannel) { self.channel = c }
+
+    func start() {
+        guard !isRunning else { return }
+        isRunning = true
+        NSLog("[HandGesture] start()")
+        ensurePermissionThenStart()
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        isRunning = false
+        NSLog("[HandGesture] stop()")
+        session.stopRunning()
+        resetTracking()
+        emitHandLostIfNeeded(force: true)
+    }
+
+    // MARK: - Internals
 
     private var channel: FlutterMethodChannel?
 
@@ -19,31 +47,96 @@ final class HandGestureController: NSObject, AVCaptureVideoDataOutputSampleBuffe
     private let visionQueue = DispatchQueue(label: "hand.gesture.vision.queue")
 
     private var isRunning = false
+    private var isSessionConfigured = false
 
     private let handPoseRequest = VNDetectHumanHandPoseRequest()
 
-    // Throttle Vision to reduce CPU load
-    private var lastVisionTime: CFTimeInterval = 0
-    private let visionInterval: CFTimeInterval = 1.0 / 12.0 // ~12fps
+    // ---- Relative control parameters (trackpad feel) ----
 
-    // Pinch normalization & scale mapping (tweak to taste)
-    private var pinchMin: CGFloat = 0.02   // near pinch
-    private var pinchMax: CGFloat = 0.18   // open
-    private var scaleMin: CGFloat = 0.70
-    private var scaleMax: CGFloat = 1.70
+    /// Update rate. Higher feels more responsive (but more CPU).
+    private var lastVisionTime: CFTimeInterval = 0
+    private let visionInterval: CFTimeInterval = 1.0 / 30.0
+
+    /// Confidence threshold to avoid noisy points.
+    private let minIndexConfidence: VNConfidence = 0.40
+
+    /// Deadzone: ignore tiny jitter.
+    private let deadzone: CGFloat = 0.0022
+
+    /// Clamp raw delta per frame to avoid spikes (camera glitches).
+    private let maxRawDelta: CGFloat = 0.06
+
+    /// Base sensitivity multiplier. Higher = faster cursor.
+    private let baseGain: CGFloat = 2.2
+
+    /// Acceleration: faster hand movement => more gain (mouse-like).
+    /// gain = baseGain * (1 + accelK * speed^accelP)
+    private let accelK: CGFloat = 3.0
+    private let accelP: CGFloat = 0.60
+
+    /// Smooth the delta a bit (but not too much).
+    private let deltaEmaAlpha: CGFloat = 0.35
+
+    /// When the tracker "reappears" after being lost, don't emit a huge delta.
+    /// We require a few stable frames before emitting deltas.
+    private let warmupFrames: Int = 2
+
+    // ----------------------------------------------------
+
+    // Coordinate transform
+    private let invertX: Bool = false
+    private let invertY: Bool = true // Vision is bottom-left, Flutter is top-left
+
+    // State
+    private var lastX: CGFloat?
+    private var lastY: CGFloat?
+    private var smDx: CGFloat?
+    private var smDy: CGFloat?
+    private var warmupLeft: Int = 0
+
+    // Hand-lost detection
+    private var lastHandSeenTime: CFTimeInterval = 0
+    private let handLostAfter: CFTimeInterval = 0.35
+    private var handWasActive = false
 
     // Log throttle
     private var lastLogTime: CFTimeInterval = 0
 
-    func setChannel(_ c: FlutterMethodChannel) {
-        self.channel = c
+    private func resetTracking() {
+        lastX = nil
+        lastY = nil
+        smDx = nil
+        smDy = nil
+        warmupLeft = 0
     }
 
-    func start() {
-        if isRunning { return }
-        isRunning = true
+    private func ensurePermissionThenStart() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            configureSessionIfNeeded()
+            session.startRunning()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                guard let self = self else { return }
+                DispatchQueue.main.async {
+                    if granted {
+                        self.configureSessionIfNeeded()
+                        self.session.startRunning()
+                    } else {
+                        self.logThrottled("[HandGesture] ❌ camera permission denied")
+                        self.emitHandLostIfNeeded(force: true)
+                    }
+                }
+            }
+        default:
+            logThrottled("[HandGesture] ❌ camera permission not available (\(AVCaptureDevice.authorizationStatus(for: .video)))")
+            emitHandLostIfNeeded(force: true)
+        }
+    }
 
-        NSLog("[HandGesture] start()")
+    private func configureSessionIfNeeded() {
+        guard !isSessionConfigured else { return }
+        isSessionConfigured = true
 
         handPoseRequest.maximumHandCount = 1
 
@@ -51,7 +144,8 @@ final class HandGestureController: NSObject, AVCaptureVideoDataOutputSampleBuffe
         session.sessionPreset = .high
 
         guard let device = AVCaptureDevice.default(for: .video) else {
-            NSLog("[HandGesture] ERROR: no camera device")
+            logThrottled("[HandGesture] ERROR: no camera device")
+            session.commitConfiguration()
             return
         }
 
@@ -59,7 +153,8 @@ final class HandGestureController: NSObject, AVCaptureVideoDataOutputSampleBuffe
             let input = try AVCaptureDeviceInput(device: device)
             if session.canAddInput(input) { session.addInput(input) }
         } catch {
-            NSLog("[HandGesture] ERROR: camera input \(error)")
+            logThrottled("[HandGesture] ERROR: camera input \(error)")
+            session.commitConfiguration()
             return
         }
 
@@ -70,25 +165,18 @@ final class HandGestureController: NSObject, AVCaptureVideoDataOutputSampleBuffe
         output.setSampleBufferDelegate(self, queue: videoQueue)
         if session.canAddOutput(output) { session.addOutput(output) }
 
-        // Mirror so the user feels natural left-right mapping.
         if let conn = output.connection(with: .video) {
             conn.isVideoMirrored = true
         }
 
         session.commitConfiguration()
-        session.startRunning()
-    }
-
-    func stop() {
-        if !isRunning { return }
-        isRunning = false
-        NSLog("[HandGesture] stop()")
-        session.stopRunning()
     }
 
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
+
+        guard isRunning else { return }
 
         let now = CACurrentMediaTime()
         if now - lastVisionTime < visionInterval { return }
@@ -104,49 +192,121 @@ final class HandGestureController: NSObject, AVCaptureVideoDataOutputSampleBuffe
                 try handler.perform([self.handPoseRequest])
             } catch {
                 self.logThrottled("[HandGesture] Vision perform error: \(error)")
+                self.emitHandLostIfNeeded()
                 return
             }
 
             guard let obs = self.handPoseRequest.results?.first else {
-                self.logThrottled("[HandGesture] no hand detected")
+                self.emitHandLostIfNeeded()
                 return
             }
 
             guard
                 let indexTip = try? obs.recognizedPoint(.indexTip),
-                let thumbTip = try? obs.recognizedPoint(.thumbTip),
-                indexTip.confidence > 0.2
+                indexTip.confidence >= self.minIndexConfidence
             else {
-                self.logThrottled("[HandGesture] keypoints missing/low confidence")
+                self.emitHandLostIfNeeded()
                 return
             }
 
-            // Normalized coordinates: 0..1
-            var xNorm = CGFloat(indexTip.location.x)
+            self.lastHandSeenTime = now
+            self.handWasActive = true
 
-            // If you find left-right inverted, toggle this:
-            // xNorm = 1.0 - xNorm
+            var x = CGFloat(indexTip.location.x)
+            var y = CGFloat(indexTip.location.y)
 
-            let dx = indexTip.location.x - thumbTip.location.x
-            let dy = indexTip.location.y - thumbTip.location.y
-            let pinch = sqrt(dx*dx + dy*dy)
+            if self.invertX { x = 1.0 - x }
+            if self.invertY { y = 1.0 - y }
 
-            let p = self.clamp((pinch - self.pinchMin) / (self.pinchMax - self.pinchMin), 0, 1)
-            let scale = self.scaleMin + (self.scaleMax - self.scaleMin) * p
+            x = self.clamp(x, 0, 1)
+            y = self.clamp(y, 0, 1)
+
+            // First frame after reacquire: initialize and warm up.
+            if self.lastX == nil || self.lastY == nil {
+                self.lastX = x
+                self.lastY = y
+                self.warmupLeft = self.warmupFrames
+                return
+            }
+
+            let rawDx = x - (self.lastX ?? x)
+            let rawDy = y - (self.lastY ?? y)
+            self.lastX = x
+            self.lastY = y
+
+            if self.warmupLeft > 0 {
+                self.warmupLeft -= 1
+                return
+            }
+
+            // Deadzone
+            var dx = abs(rawDx) < self.deadzone ? 0 : rawDx
+            var dy = abs(rawDy) < self.deadzone ? 0 : rawDy
+
+            // Clamp spikes
+            dx = self.clamp(dx, -self.maxRawDelta, self.maxRawDelta)
+            dy = self.clamp(dy, -self.maxRawDelta, self.maxRawDelta)
+
+            // Smooth deltas
+            self.smDx = self.ema(self.smDx, dx, self.deltaEmaAlpha)
+            self.smDy = self.ema(self.smDy, dy, self.deltaEmaAlpha)
+
+            let sdx = self.smDx ?? dx
+            let sdy = self.smDy ?? dy
+
+            // Mouse acceleration
+            let speed = sqrt(sdx*sdx + sdy*sdy) // normalized per update
+            let gain = self.baseGain * (1.0 + self.accelK * pow(speed, self.accelP))
+
+            let outDx = sdx * gain
+            let outDy = sdy * gain
+
+            if outDx == 0 && outDy == 0 { return }
+
             let conf = CGFloat(indexTip.confidence)
 
             DispatchQueue.main.async { [weak self] in
                 guard let self = self, let ch = self.channel else { return }
-                ch.invokeMethod("handPose", arguments: [
-                    "x": Double(self.clamp(xNorm, 0, 1)),
-                    "scale": Double(self.clamp(scale, self.scaleMin, self.scaleMax)),
+                ch.invokeMethod("handDelta", arguments: [
+                    "dx": Double(outDx),
+                    "dy": Double(outDy),
                     "confidence": Double(self.clamp(conf, 0, 1)),
                 ])
             }
 
-            self.logThrottled(String(format: "[HandGesture] x=%.3f pinch=%.3f scale=%.2f conf=%.2f",
-                                     Double(xNorm), Double(pinch), Double(scale), Double(conf)))
+            self.logThrottled(String(format: "[HandGesture] delta(%.4f,%.4f) speed=%.4f gain=%.2f conf=%.2f",
+                                     Double(outDx), Double(outDy), Double(speed), Double(gain), Double(conf)))
         }
+    }
+
+    private func emitHandLostIfNeeded(force: Bool = false) {
+        let now = CACurrentMediaTime()
+
+        if force {
+            if handWasActive {
+                handWasActive = false
+                DispatchQueue.main.async { [weak self] in
+                    self?.channel?.invokeMethod("handLost", arguments: nil)
+                }
+            }
+            return
+        }
+
+        if !handWasActive { return }
+
+        if now - lastHandSeenTime >= handLostAfter {
+            handWasActive = false
+            resetTracking()
+            DispatchQueue.main.async { [weak self] in
+                self?.channel?.invokeMethod("handLost", arguments: nil)
+            }
+            logThrottled("[HandGesture] handLost")
+        }
+    }
+
+    private func ema(_ prev: CGFloat?, _ next: CGFloat, _ a: CGFloat) -> CGFloat {
+        guard let p = prev else { return next }
+        return p + a * (next - p)
     }
 
     private func clamp<T: Comparable>(_ v: T, _ a: T, _ b: T) -> T { min(max(v, a), b) }
