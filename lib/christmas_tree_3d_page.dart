@@ -1,6 +1,4 @@
 import 'dart:math' as math;
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_gl/flutter_gl.dart';
@@ -141,7 +139,7 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
   }
 
   void _buildGround() {
-    final groundGeom = three.CircleGeometry(6, 40);
+    final groundGeom = three.CircleGeometry(radius: 6, segments: 40);
     final groundMat = three.MeshPhongMaterial({
       'color': _colorFromHex(0x0f0f14),
       'emissive': _colorFromHex(0x070708),
@@ -246,7 +244,7 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
     final geometry = three.BufferGeometry();
     geometry.setAttribute(
       'position',
-      three.Float32BufferAttribute(Float32List.fromList(positions), 3),
+      three.Float32BufferAttribute(three.Float32Array.from(positions), 3),
     );
     geometry.attributes['position']!.needsUpdate = true;
     final material = three.PointsMaterial({
