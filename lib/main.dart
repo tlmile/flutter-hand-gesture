@@ -1,19 +1,21 @@
 import 'package:flutter/material.dart';
-import 'hand_ball_page.dart';
+import 'christmas_tree_3d_page.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const MyApp());
+  runApp(const ChristmasTreeApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class ChristmasTreeApp extends StatelessWidget {
+  const ChristmasTreeApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
+    return MaterialApp(
+      title: '3D Christmas Tree',
       debugShowCheckedModeBanner: false,
-      home: HandBallPage(),
+      theme: ThemeData.dark(),
+      home: const ChristmasTree3DPage(),
     );
   }
 }
