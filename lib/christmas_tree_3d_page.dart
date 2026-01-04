@@ -73,7 +73,7 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
     final size = MediaQuery.sizeOf(context);
     _width = size.width;
     _height = size.height;
-    _dpr = MediaQuery.devicePixelRatio.clamp(1.0, 3.0);
+    _dpr = MediaQuery.devicePixelRatioOf(context).clamp(1.0, 3.0);
 
     _glPlugin = FlutterGlPlugin();
     await _glPlugin!.initialize(options: {
