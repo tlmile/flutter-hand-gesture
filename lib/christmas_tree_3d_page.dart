@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -104,9 +105,9 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
 
     // Offscreen render target for mobile; updated into Flutter texture
     _renderTarget = three.WebGLRenderTarget(
-      width: (_width * _dpr).toInt(),
-      height: (_height * _dpr).toInt(),
-      options: three.WebGLRenderTargetOptions({
+      (_width * _dpr).toInt(),
+      (_height * _dpr).toInt(),
+      three.WebGLRenderTargetOptions({
         'samples': 4,
         'format': three.RGBAFormat,
       }),
@@ -245,7 +246,7 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
     final geometry = three.BufferGeometry();
     geometry.setAttribute(
       'position',
-      three.Float32BufferAttribute(positions, 3),
+      three.Float32BufferAttribute(Float32List.fromList(positions), 3),
     );
     geometry.attributes['position']!.needsUpdate = true;
     final material = three.PointsMaterial({
@@ -261,7 +262,7 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
   }
 
   void _updateSnow(double dt) {
-    final positionsAttr = _snowPoints?.geometry.getAttribute('position');
+    final positionsAttr = _snowPoints?.geometry?.getAttribute('position');
     if (positionsAttr == null) return;
     final array = positionsAttr.array as List<double>;
     for (int i = 0; i < _snowSpeeds.length; i++) {
