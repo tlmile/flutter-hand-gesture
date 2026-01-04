@@ -1,5 +1,4 @@
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_gl/flutter_gl.dart';
@@ -243,9 +242,10 @@ class _ChristmasTree3DPageState extends State<ChristmasTree3DPage>
     }
 
     final geometry = three.BufferGeometry();
+    final positionArray = three.Float32Array.from(positions);
     geometry.setAttribute(
       'position',
-      three.Float32BufferAttribute(Float32List.fromList(positions), 3),
+      three.Float32BufferAttribute(positionArray, 3),
     );
     geometry.attributes['position']!.needsUpdate = true;
     final material = three.PointsMaterial({
